@@ -649,22 +649,39 @@ public class SwingUtils {
 
     Rectangle screenBounds = null;
     GraphicsConfiguration screenGC = null;
+    // Keep all usable screens to optionally choose a better destination that can contain the whole window
+    GraphicsDevice[] allDevices = null;
+    Rectangle[] usableBoundsPerDevice = null;
 
     try {
       final GraphicsEnvironment ge = GraphicsEnvironment.getLocalGraphicsEnvironment();
       final GraphicsDevice[] devices = ge.getScreenDevices();
+      allDevices = devices;
       if (devices != null && devices.length > 0) {
         // Pick the screen with the largest intersection with the window rect; if none, the nearest by center.
         long bestArea = -1;
         double bestDist2 = Double.MAX_VALUE;
         GraphicsDevice bestDev = devices[0];
         Rectangle bestBounds = new Rectangle(bestDev.getDefaultConfiguration().getBounds());
+        // Precompute usable bounds per device (apply insets)
+        usableBoundsPerDevice = new Rectangle[devices.length];
 
         final double cx = windowRect.getCenterX();
         final double cy = windowRect.getCenterY();
 
-        for (final GraphicsDevice gd : devices) {
+        for (int i = 0; i < devices.length; i++) {
+          final GraphicsDevice gd = devices[i];
           final Rectangle b = new Rectangle(gd.getDefaultConfiguration().getBounds());
+          // Usable area with insets
+          final Insets ins = Toolkit.getDefaultToolkit().getScreenInsets(gd.getDefaultConfiguration());
+          final Rectangle usable = new Rectangle(b);
+          usable.translate(ins.left, ins.top);
+          usable.setSize(
+            Math.max(0, usable.width - ins.left - ins.right),
+            Math.max(0, usable.height - ins.top - ins.bottom)
+          );
+          usableBoundsPerDevice[i] = usable;
+
           final Rectangle inter = b.intersection(windowRect);
           final long area = (long) Math.max(0, inter.width) * Math.max(0, inter.height);
           if (area > bestArea) {
@@ -692,13 +709,13 @@ public class SwingUtils {
         screenGC = bestDev.getDefaultConfiguration();
         // Apply insets to compute usable area on the chosen screen
         final Insets insets = Toolkit.getDefaultToolkit().getScreenInsets(screenGC);
-        bestBounds = new Rectangle(bestBounds);
-        bestBounds.translate(insets.left, insets.top);
-        bestBounds.setSize(
-          Math.max(0, bestBounds.width - insets.left - insets.right),
-          Math.max(0, bestBounds.height - insets.top - insets.bottom)
+        final Rectangle chosenUsable = new Rectangle(bestBounds);
+        chosenUsable.translate(insets.left, insets.top);
+        chosenUsable.setSize(
+          Math.max(0, chosenUsable.width - insets.left - insets.right),
+          Math.max(0, chosenUsable.height - insets.top - insets.bottom)
         );
-        screenBounds = bestBounds;
+        screenBounds = chosenUsable;
       }
     }
     catch (Throwable t) {
@@ -710,13 +727,71 @@ public class SwingUtils {
       screenBounds = getScreenBounds(window);
     }
 
-    window.setMaximumSize(new Dimension(screenBounds.width, screenBounds.height));
     final Dimension windowSize = window.getSize();
 
-    // If window is too large in either Dimension, force it smaller
-    if (windowSize.width > screenBounds.width || windowSize.height > screenBounds.height) {
-      windowSize.width = Math.min(screenBounds.width, windowSize.width);
-      windowSize.height = Math.min(screenBounds.height, windowSize.height);
+    // Prefer a screen that can contain the whole window without resizing, if any
+    Rectangle destinationScreen = screenBounds;
+    if (allDevices != null && usableBoundsPerDevice != null) {
+      long bestContainmentArea = -1; // among screens that can fully contain the window
+      double bestContainmentDist2 = Double.MAX_VALUE;
+      Rectangle bestContainment = null;
+      final double cx = windowRect.getCenterX();
+      final double cy = windowRect.getCenterY();
+      for (int i = 0; i < allDevices.length; i++) {
+        final Rectangle usable = usableBoundsPerDevice[i];
+        if (usable == null) continue;
+        if (usable.width >= windowSize.width && usable.height >= windowSize.height) {
+          // Screen can contain the window as-is: prefer largest intersection with current rect, else nearest
+          final Rectangle inter = usable.intersection(windowRect);
+          final long area = (long) Math.max(0, inter.width) * Math.max(0, inter.height);
+          if (area > bestContainmentArea) {
+            bestContainmentArea = area;
+            bestContainmentDist2 = Double.MAX_VALUE;
+            bestContainment = usable;
+          }
+          else if (area == bestContainmentArea) {
+            final double sx = Math.max(usable.getMinX(), Math.min(cx, usable.getMaxX()));
+            final double sy = Math.max(usable.getMinY(), Math.min(cy, usable.getMaxY()));
+            final double dx = cx - sx;
+            final double dy = cy - sy;
+            final double dist2 = dx * dx + dy * dy;
+            if (dist2 < bestContainmentDist2) {
+              bestContainmentDist2 = dist2;
+              bestContainment = usable;
+            }
+          }
+        }
+      }
+
+      if (bestContainment != null) {
+        destinationScreen = bestContainment;
+      }
+      else {
+        // No screen can contain current size: choose the screen with the largest usable area
+        int bestIdx = -1;
+        long bestArea = -1;
+        for (int i = 0; i < usableBoundsPerDevice.length; i++) {
+          final Rectangle usable = usableBoundsPerDevice[i];
+          if (usable == null) continue;
+          final long area = (long) Math.max(0, usable.width) * Math.max(0, usable.height);
+          if (area > bestArea) {
+            bestArea = area;
+            bestIdx = i;
+          }
+        }
+        if (bestIdx >= 0) {
+          destinationScreen = usableBoundsPerDevice[bestIdx];
+        }
+      }
+    }
+
+    // Now ensure the window is fully contained in the chosen destination screen.
+    window.setMaximumSize(new Dimension(destinationScreen.width, destinationScreen.height));
+
+    // If window is too large for destination screen, shrink to fit that screen entirely
+    if (windowSize.width > destinationScreen.width || windowSize.height > destinationScreen.height) {
+      windowSize.width = Math.min(destinationScreen.width, windowSize.width);
+      windowSize.height = Math.min(destinationScreen.height, windowSize.height);
       window.setSize(windowSize);
     }
 
@@ -724,23 +799,23 @@ public class SwingUtils {
     final Rectangle bounds = new Rectangle(window.getX(), window.getY(), windowSize.width, windowSize.height);
 
     // Extends off top of visible screen? Slide down.
-    if (bounds.y < screenBounds.y) {
-      bounds.y = screenBounds.y;
+    if (bounds.y < destinationScreen.y) {
+      bounds.y = destinationScreen.y;
     }
 
     // Extends off bottom of visible screen? Slide up.
-    if (bounds.y + bounds.height > screenBounds.y + screenBounds.height) {
-      bounds.y = screenBounds.y + screenBounds.height - bounds.height;
+    if (bounds.y + bounds.height > destinationScreen.y + destinationScreen.height) {
+      bounds.y = destinationScreen.y + destinationScreen.height - bounds.height;
     }
 
     // Extends off left of visible screen? Slide right.
-    if (bounds.x < screenBounds.x) {
-      bounds.x = screenBounds.x;
+    if (bounds.x < destinationScreen.x) {
+      bounds.x = destinationScreen.x;
     }
 
     // Extends off right of visible screen? Slide left.
-    if (bounds.x + bounds.width > screenBounds.x + screenBounds.width) {
-      bounds.x = screenBounds.x + screenBounds.width - bounds.width;
+    if (bounds.x + bounds.width > destinationScreen.x + destinationScreen.width) {
+      bounds.x = destinationScreen.x + destinationScreen.width - bounds.width;
     }
 
     // Adjust the position
