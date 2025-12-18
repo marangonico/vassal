@@ -234,6 +234,12 @@ public class PositionOption extends VASSAL.configure.Configurer
         // Save the previous size in case this is the start of a Maximize
         previousBounds = new Rectangle(bounds);
         bounds.setLocation(p);
+        // Persist the updated location into the underlying Configurer immediately
+        try {
+          super.setValue(bounds);
+        }
+        catch (Throwable ignore) {
+        }
       }
     }
   }
@@ -251,6 +257,12 @@ public class PositionOption extends VASSAL.configure.Configurer
       else {
         bounds.setSize(theFrame.getSize());
       }
+      // Persist the updated size into the underlying Configurer immediately
+      try {
+        super.setValue(bounds);
+      }
+      catch (Throwable ignore) {
+      }
     }
   }
 
@@ -260,6 +272,27 @@ public class PositionOption extends VASSAL.configure.Configurer
 
   @Override
   public void componentHidden(ComponentEvent e) {
+    // Ensure final bounds are captured when the window is hidden
+    if (theFrame != null) {
+      bounds = new Rectangle(theFrame.getX(), theFrame.getY(), theFrame.getWidth(), theFrame.getHeight());
+      try {
+        super.setValue(bounds);
+      }
+      catch (Throwable ignore) {
+      }
+
+      // Best-effort flush of prefs to disk so that a module restart in the same app session
+      // restores the last HelpWindow bounds. We avoid throwing if globals are not yet initialised.
+      try {
+        final Prefs gl = Prefs.getGlobalPrefs();
+        if (gl != null) {
+          gl.save();
+        }
+      }
+      catch (Throwable ignore) {
+        // Ignore I/O issues; global save occurs on normal app/module shutdown anyway
+      }
+    }
   }
 
   protected void setFrameBounds() {
@@ -277,7 +310,36 @@ public class PositionOption extends VASSAL.configure.Configurer
     }
 
     // Choose the screen we will clamp to
-    final Rectangle targetScreen = (requested != null) ? chooseBestScreen(requested) : chooseBestScreen(new Rectangle(desktopBounds));
+    final Rectangle targetScreen;
+    if (requested != null) {
+      targetScreen = chooseBestScreen(requested);
+    }
+    else {
+      // No saved bounds yet: prefer the screen of the owner window (if any),
+      // otherwise the screen of the currently active/focused window. This makes
+      // first-open placement follow the monitor of the window which initiated
+      // the Help/dialog, instead of defaulting to the primary screen.
+      Rectangle hint = null;
+      try {
+        final Window owner = (theFrame != null) ? theFrame.getOwner() : null;
+        if (owner != null && owner.getGraphicsConfiguration() != null) {
+          hint = new Rectangle(owner.getGraphicsConfiguration().getBounds());
+        }
+        if (hint == null) {
+          final java.awt.Window active = java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+          if (active != null && active.getGraphicsConfiguration() != null) {
+            hint = new Rectangle(active.getGraphicsConfiguration().getBounds());
+          }
+        }
+        if (hint == null && theFrame != null && theFrame.getGraphicsConfiguration() != null) {
+          hint = new Rectangle(theFrame.getGraphicsConfiguration().getBounds());
+        }
+      }
+      catch (Throwable ignore) {
+        // be defensive; fall back below
+      }
+      targetScreen = (hint != null) ? new Rectangle(hint) : chooseBestScreen(new Rectangle(desktopBounds));
+    }
 
     // Reduce size to fit on chosen screen
     final int width = Math.min(theFrame.getSize().width, targetScreen.width);
@@ -322,6 +384,14 @@ public class PositionOption extends VASSAL.configure.Configurer
     // Update stored bounds so that persistence reflects the final applied rectangle even if
     // no move/resize events occur before closing the window.
     bounds = new Rectangle(theFrame.getX(), theFrame.getY(), theFrame.getWidth(), theFrame.getHeight());
+    // Also update the underlying Configurer value so that Prefs.save() will write the latest bounds
+    // even if we never received move/resize events after applying these bounds programmatically.
+    try {
+      super.setValue(bounds);
+    }
+    catch (Throwable ignore) {
+      // ignore any issues updating value strings here
+    }
   }
 
 }

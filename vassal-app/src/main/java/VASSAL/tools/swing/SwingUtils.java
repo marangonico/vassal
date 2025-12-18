@@ -494,10 +494,18 @@ public class SwingUtils {
         c = w.getOwner();
       }
       else {
-        // If no explicit owner, try to use the currently focused window as a hint
-        final Window focused = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusedWindow();
-        if (focused != null && focused.getGraphicsConfiguration() != null) {
-          c = focused;
+        // If this window has its own GraphicsConfiguration, prefer that rather than
+        // borrowing the currently focused window as a hint. This avoids sizing based
+        // on a different monitor than the one Java has already associated to this window
+        // (e.g., after an initial pack()).
+        if (w.getGraphicsConfiguration() == null) {
+          // As a last hint, try the currently focused window
+          final Window focused = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusedWindow();
+          if (focused != null && focused.getGraphicsConfiguration() != null) {
+            c = focused;
+          }
+        } else {
+          c = w; // use this window's own GC
         }
       }
     }
